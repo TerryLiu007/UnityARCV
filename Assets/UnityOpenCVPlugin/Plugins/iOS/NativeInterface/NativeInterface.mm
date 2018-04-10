@@ -7,22 +7,33 @@
 //
 
 #import <opencv2/opencv.hpp>
+#import <opencv2/xfeatures2d.hpp>
 #import <UIKit/UIKit.h>
 
+using namespace cv;
+using namespace cv::xfeatures2d;
+
 // OpenCV implementation part
-@interface VideoCapture : NSObject
+@interface videoCapture : NSObject
 {
     int width;
     int height;
+    std::vector<KeyPoint> keypoints_object;
+    Mat descriptors_object;
+    Mat img_object;
+    Mat debug;
+    Ptr<ORB> detector_brisk;
 }
 @end
 
-@implementation VideoCapture
+@implementation videoCapture
+
 - (instancetype)initWithWidth:(int)w height:(int)h {
-    self = [super self];
+    // self = [super self];
     if (self) {
         width = w;
         height = h;
+        detector_brisk = ORB::create();
     }
     return self;
 }
@@ -31,16 +42,16 @@
    
 }
 
-- (void)updateWithWidth: (int) inputWidth height: (int) inputHeight input:(unsigned char*)inputData output:(unsigned char*)outputData {
-    cv::Mat img(inputHeight, inputWidth, CV_8UC1, inputData);
+- (void)updateWithWidth: (int)inputWidth height: (int)inputHeight input: (unsigned char*)inputData output: (unsigned char*)outputData {
+    Mat img(inputHeight, inputWidth, CV_8UC1, inputData);
     
     // Resized to specified size
-    cv::Mat gray(height, width, img.type());
-    cv::resize(img, gray, gray.size(), cv::INTER_AREA);
+    Mat gray((int)inputHeight/2, (int)inputWidth/2, img.type());
+    resize(img, gray, gray.size(), cv::INTER_AREA);
     
     // Convert to Unity's texture format (RGBA)
-    cv::Mat argb;
-    cv::cvtColor(gray, argb, CV_GRAY2RGBA);
+    Mat argb;
+    cvtColor(gray, argb, CV_GRAY2RGBA);
     
     // Copy to buffer secured by Unity side
     memcpy(outputData, argb.data, argb.total() * argb.elemSize());
@@ -48,6 +59,97 @@
     //.total() returns total pixels
     //.eleSize() returns element size in bytes
     //memcpy(void* destination, const void* source, size_t num)
+}
+
+
+- (void)recognizeImageWithWidth: (int)inputWidth height: (int)inputHeight stream: (unsigned char*)inputScene target: (unsigned char*)inputObject x_cord: (int*)x y_cord: (int*)y redetect: (BOOL)redetect output: (unsigned char*)outputData{
+    
+    Mat mat_scene(inputHeight, inputWidth, CV_8UC1, inputScene);
+    
+    // Resized img_scene to specified size
+    Mat img_scene((int)inputHeight/2, (int)inputWidth/2, mat_scene.type());
+    resize(mat_scene, img_scene, img_scene.size(), INTER_AREA);
+    
+    // Detect features of the object if needed
+    if(redetect && inputObject)
+    {
+        Mat mat_object(height, width, CV_8UC4);
+        memcpy(mat_object.data, inputObject, mat_object.total() * mat_object.elemSize());
+        cvtColor(mat_object, mat_object, CV_RGBA2GRAY);
+        flip(mat_object, img_object, 0);
+        
+        detector_brisk->detectAndCompute( img_object, Mat(), keypoints_object, descriptors_object );
+    }
+    
+    
+    
+    if(!descriptors_object.data)
+    {
+        *x = 0;
+        *y = 0;
+        return;
+    }
+    
+    std::vector<KeyPoint> keypoints_scene;
+    Mat descriptors_scene;
+    detector_brisk->detectAndCompute( img_scene, Mat(), keypoints_scene, descriptors_scene );
+    
+    if (keypoints_scene.size() < 12)
+    {
+        *x = 0;
+        *y = 0;
+        return;
+    }
+    
+    //std::vector< DMatch > matches;
+    std::vector< DMatch > good_matches;
+    
+    //Matching descriptor vectors using BF with Crosscheck
+    BFMatcher matcher(NORM_HAMMING, true);
+    matcher.match( descriptors_object, descriptors_scene, good_matches );
+    
+    // Localize the object
+    std::vector<Point2f> obj;
+    std::vector<Point2f> scene;
+    for( size_t i = 0; i < good_matches.size(); i++ )
+    {
+        // Get the keypoints from the good matches
+        obj.push_back( keypoints_object[ good_matches[i].queryIdx ].pt );
+        scene.push_back( keypoints_scene[ good_matches[i].trainIdx ].pt );
+    }
+    Mat H = findHomography( obj, scene, RANSAC, 6.0);
+    
+    // Get the corners from the object ( the object to be "detected" )
+    std::vector<Point2f> obj_corners(4);
+    obj_corners[0] = cvPoint(0,0);
+    obj_corners[1] = cvPoint( img_object.cols, 0 );
+    obj_corners[2] = cvPoint( img_object.cols, img_object.rows );
+    obj_corners[3] = cvPoint( 0, img_object.rows );
+    std::vector<Point2f> scene_corners(4);
+    perspectiveTransform( obj_corners, scene_corners, H);
+    
+    if(isContourConvex(scene_corners) && 16*contourArea(scene_corners) > inputWidth*inputHeight){
+        // pinpoint the centroid
+        Moments M = moments(scene_corners);
+        *x = (int)(M.m10/M.m00);
+        *y = (int)(M.m01/M.m00);
+        
+        // Draw lines between the corners ( the mapped object in the scene )
+        line( img_scene, scene_corners[0], scene_corners[1], Scalar(255), 4 );
+        line( img_scene, scene_corners[1], scene_corners[2], Scalar(255), 4 );
+        line( img_scene, scene_corners[2], scene_corners[3], Scalar(255), 4 );
+        line( img_scene, scene_corners[3], scene_corners[0], Scalar(255), 4 );
+        
+        Mat texture2D;
+        cvtColor(img_scene, texture2D, CV_GRAY2RGBA);
+        memcpy(outputData, texture2D.data, texture2D.total() * texture2D.elemSize());
+        return;
+        
+    }else{
+        *x = 0;
+        *y = 0;
+        return;
+    }
 }
 @end
 
@@ -57,23 +159,29 @@ extern "C" {
     void* allocateVideoCapture(int width, int height);
     void releaseVideoCapture(void* capture);
     void updateVideoCapture(void* capture, int width, int height, unsigned char* inputImage, unsigned char* outputImage);
+    void imageTrigger(void* capture, int inputWidth, int inputHeight, unsigned char* inputScene, unsigned char* inputObject, int* x, int* y, BOOL redetect, unsigned char* outputImage);
 }
 
 // Generate objects
 void* allocateVideoCapture(int width, int height) {
-    VideoCapture* capture = [[VideoCapture alloc] initWithWidth:width height:height];
+    videoCapture* capture = [[videoCapture alloc] initWithWidth:width height:height];
     return (__bridge_retained void*)capture;
 }
 
 // destroy object
 void releaseVideoCapture(void* capture) {
-    VideoCapture* cap = (__bridge_transfer VideoCapture*)capture;
+    videoCapture* cap = (__bridge_transfer videoCapture*)capture;
     cap = nil;
 }
 
 // for calling every frame
 void updateVideoCapture(void* capture, int width, int height, unsigned char* inputImage, unsigned char* outputImage) {
-    VideoCapture* cap = (__bridge VideoCapture*)capture;
+    videoCapture* cap = (__bridge videoCapture*)capture;
     [cap updateWithWidth:width height:height input:inputImage output:outputImage];
+}
+
+void imageTrigger(void* capture, int inputWidth, int inputHeight, unsigned char* inputScene, unsigned char* inputObject, int* x, int* y, BOOL redetect, unsigned char* outputImage) {
+    videoCapture* cap = (__bridge videoCapture*)capture;
+    [cap recognizeImageWithWidth:inputWidth height:inputHeight stream:inputScene target:inputObject x_cord:x y_cord:y redetect:redetect output:outputImage];
 }
 
