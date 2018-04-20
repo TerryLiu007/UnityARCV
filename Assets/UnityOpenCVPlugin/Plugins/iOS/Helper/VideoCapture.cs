@@ -14,11 +14,12 @@ public class VideoCapture : MonoBehaviour {
 	private int inputWidth;
 	private int inputHeight;
 
-	public Renderer renderTarget;
+	public Image renderTarget;
 	public Texture2D objectTexture;
 	public Text xText;
 	public Text yText;
 	public GameObject model;
+	public LayerMask collisionLayer;
 
 	// only allow once for object descriptor detection
 	private bool detect = true;
@@ -71,6 +72,8 @@ public class VideoCapture : MonoBehaviour {
 
 	// Use this for initialization
 	void Start () {
+
+		model.SetActive (false);
 
 		#if UNITY_IOS
 		UnityARSessionNativeInterface.ARFrameUpdatedEvent += UpdateCamera;
@@ -151,9 +154,11 @@ public class VideoCapture : MonoBehaviour {
 
 		Ray ray = Camera.main.ScreenPointToRay(new Vector2(x*2, y*2));
 		RaycastHit hit;
-		if (Physics.Raycast(ray, out hit, 100))
+		if (Physics.Raycast(ray, out hit, 100, collisionLayer))
 		{
 			model.transform.position = hit.point;
+			if (!model.activeInHierarchy)
+				model.SetActive(true);
 		}
 
 		detect = false;

@@ -13,19 +13,20 @@
 using namespace cv;
 using namespace cv::xfeatures2d;
 
-// OpenCV implementation part
+// OpenCV interface
 @interface videoCapture : NSObject
 {
     int width;
     int height;
+    int scaleFactor;
+    Ptr<ORB> detector;
     std::vector<KeyPoint> keypoints_object;
     Mat descriptors_object;
     Mat img_object;
-    Mat debug;
-    Ptr<ORB> detector_brisk;
 }
 @end
 
+// OpenCV implementation
 @implementation videoCapture
 
 - (instancetype)initWithWidth:(int)w height:(int)h {
@@ -33,7 +34,8 @@ using namespace cv::xfeatures2d;
     if (self) {
         width = w;
         height = h;
-        detector_brisk = ORB::create();
+        scaleFactor = 3;
+        detector = ORB::create();
     }
     return self;
 }
@@ -46,7 +48,7 @@ using namespace cv::xfeatures2d;
     Mat img(inputHeight, inputWidth, CV_8UC1, inputData);
     
     // Resized to specified size
-    Mat gray((int)inputHeight/2, (int)inputWidth/2, img.type());
+    Mat gray((int)inputHeight/scaleFactor, (int)inputWidth/scaleFactor, img.type());
     resize(img, gray, gray.size(), cv::INTER_AREA);
     
     // Convert to Unity's texture format (RGBA)
@@ -66,8 +68,8 @@ using namespace cv::xfeatures2d;
     
     Mat mat_scene(inputHeight, inputWidth, CV_8UC1, inputScene);
     
-    // Resized img_scene to specified size
-    Mat img_scene((int)inputHeight/2, (int)inputWidth/2, mat_scene.type());
+    // Resize input video frame to a smaller size
+    Mat img_scene((int)inputHeight/scaleFactor, (int)inputWidth/scaleFactor, mat_scene.type());
     resize(mat_scene, img_scene, img_scene.size(), INTER_AREA);
     
     // Detect features of the object if needed
@@ -78,10 +80,8 @@ using namespace cv::xfeatures2d;
         cvtColor(mat_object, mat_object, CV_RGBA2GRAY);
         flip(mat_object, img_object, 0);
         
-        detector_brisk->detectAndCompute( img_object, Mat(), keypoints_object, descriptors_object );
+        detector->detectAndCompute( img_object, Mat(), keypoints_object, descriptors_object );
     }
-    
-    
     
     if(!descriptors_object.data)
     {
@@ -92,7 +92,7 @@ using namespace cv::xfeatures2d;
     
     std::vector<KeyPoint> keypoints_scene;
     Mat descriptors_scene;
-    detector_brisk->detectAndCompute( img_scene, Mat(), keypoints_scene, descriptors_scene );
+    detector->detectAndCompute( img_scene, Mat(), keypoints_scene, descriptors_scene );
     
     if (keypoints_scene.size() < 12)
     {
@@ -104,7 +104,7 @@ using namespace cv::xfeatures2d;
     //std::vector< DMatch > matches;
     std::vector< DMatch > good_matches;
     
-    //Matching descriptor vectors using BF with Crosscheck
+    //Matching descriptor vectors using BF with crosscheck
     BFMatcher matcher(NORM_HAMMING, true);
     matcher.match( descriptors_object, descriptors_scene, good_matches );
     
@@ -128,11 +128,11 @@ using namespace cv::xfeatures2d;
     std::vector<Point2f> scene_corners(4);
     perspectiveTransform( obj_corners, scene_corners, H);
     
-    if(isContourConvex(scene_corners) && 16*contourArea(scene_corners) > inputWidth*inputHeight){
+    if(isContourConvex(scene_corners) && 8*scaleFactor*scaleFactor*contourArea(scene_corners) > inputWidth*inputHeight){
         // pinpoint the centroid
         Moments M = moments(scene_corners);
         *x = (int)(M.m10/M.m00);
-        *y = (int)(M.m01/M.m00);
+        *y = 360-(int)(M.m01/M.m00);
         
         // Draw lines between the corners ( the mapped object in the scene )
         line( img_scene, scene_corners[0], scene_corners[1], Scalar(255), 4 );
@@ -140,8 +140,10 @@ using namespace cv::xfeatures2d;
         line( img_scene, scene_corners[2], scene_corners[3], Scalar(255), 4 );
         line( img_scene, scene_corners[3], scene_corners[0], Scalar(255), 4 );
         
+        // texture2D must match Unity texture2D dimension - 640*360
         Mat texture2D;
         cvtColor(img_scene, texture2D, CV_GRAY2RGBA);
+        flip(texture2D, texture2D, 0);
         memcpy(outputData, texture2D.data, texture2D.total() * texture2D.elemSize());
         return;
         
@@ -180,6 +182,7 @@ void updateVideoCapture(void* capture, int width, int height, unsigned char* inp
     [cap updateWithWidth:width height:height input:inputImage output:outputImage];
 }
 
+// for image trigger mechanism
 void imageTrigger(void* capture, int inputWidth, int inputHeight, unsigned char* inputScene, unsigned char* inputObject, int* x, int* y, BOOL redetect, unsigned char* outputImage) {
     videoCapture* cap = (__bridge videoCapture*)capture;
     [cap recognizeImageWithWidth:inputWidth height:inputHeight stream:inputScene target:inputObject x_cord:x y_cord:y redetect:redetect output:outputImage];
