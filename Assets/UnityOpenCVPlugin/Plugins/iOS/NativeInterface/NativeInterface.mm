@@ -13,6 +13,8 @@
 using namespace cv;
 using namespace cv::xfeatures2d;
 
+enum mode {average, kalman, none};
+
 // OpenCV interface
 @interface videoCapture : NSObject
 {
@@ -23,11 +25,21 @@ using namespace cv::xfeatures2d;
     std::vector<KeyPoint> keypoints_object;
     Mat descriptors_object;
     Mat img_object;
+    enum mode smoothMode;
 }
 @end
 
 // OpenCV implementation
 @implementation videoCapture
+
+// parameters for first approach
+int totalNum = 3;
+std::vector<Point2f> scene_centors(totalNum);
+int counter = 0;
+
+// parameters for second approach
+KalmanFilter KF(4,2);
+Mat_<float> measurement(2,1);
 
 - (instancetype)initWithWidth:(int)w height:(int)h {
     // self = [super self];
@@ -36,13 +48,21 @@ using namespace cv::xfeatures2d;
         height = h;
         scaleFactor = 3;
         detector = ORB::create();
+        smoothMode = none;
+        
+        // Kalman Filter initialization
+        KF.transitionMatrix = (Mat_<float>(4, 4) << 1,0,1,0, 0,1,0,1, 0,0,1,0, 0,0,0,1);
+        measurement.setTo(Scalar(0));
+        KF.statePre.at<float>(2) = 0;
+        KF.statePre.at<float>(3) = 0;
+        setIdentity(KF.measurementMatrix);
+        setIdentity(KF.processNoiseCov, Scalar::all(1e-4));
+        setIdentity(KF.measurementNoiseCov, Scalar::all(1e-1));
+        setIdentity(KF.errorCovPost, Scalar::all(.1));
     }
     return self;
 }
 
-- (void)dealloc {
-   
-}
 
 - (void)updateWithWidth: (int)inputWidth height: (int)inputHeight input: (unsigned char*)inputData output: (unsigned char*)outputData {
     Mat img(inputHeight, inputWidth, CV_8UC1, inputData);
@@ -79,7 +99,6 @@ using namespace cv::xfeatures2d;
         memcpy(mat_object.data, inputObject, mat_object.total() * mat_object.elemSize());
         cvtColor(mat_object, mat_object, CV_RGBA2GRAY);
         flip(mat_object, img_object, 0);
-        
         detector->detectAndCompute( img_object, Mat(), keypoints_object, descriptors_object );
     }
     
@@ -129,10 +148,61 @@ using namespace cv::xfeatures2d;
     perspectiveTransform( obj_corners, scene_corners, H);
     
     if(isContourConvex(scene_corners) && 8*scaleFactor*scaleFactor*contourArea(scene_corners) > inputWidth*inputHeight){
-        // pinpoint the centroid
-        Moments M = moments(scene_corners);
-        *x = (int)(M.m10/M.m00);
-        *y = 360-(int)(M.m01/M.m00);
+        // pinpoint the centor
+        std::vector<Point2f> obj_centor(1);
+        obj_centor[0] = cvPoint( img_object.cols/2, img_object.rows/2 );
+        std::vector<Point2f> scene_centor(1);
+        perspectiveTransform(obj_centor, scene_centor, H);
+        
+        //**********FIRST APPROACH**********//
+        if (smoothMode == average)
+        {
+            scene_centors[counter] = scene_centor[0];
+            counter = counter + 1;
+            if (counter > totalNum - 1){
+                counter = 0;
+            }
+
+            float avg_x = 0;
+            float avg_y = 0;
+
+            for (int i = 0; i < totalNum; i++){
+                avg_x += scene_centors[i].x;
+            }
+
+            for (int i = 0; i < totalNum; i++){
+                avg_y += scene_centors[i].y;
+            }
+
+            *x = (int)(avg_x/totalNum);
+            *y = 360-(int)(avg_y/totalNum);
+        }
+        
+        //**********SECOND APPROACH**********//
+        if (smoothMode == kalman)
+        {
+            if (counter == 0)
+            {
+                KF.statePre.at<float>(0) = scene_centor[0].x;
+                KF.statePre.at<float>(1) = scene_centor[0].y;
+                counter += 1;
+            }
+            
+            // Kalman Filter
+            Mat prediction = KF.predict();
+            
+            measurement(0) = scene_centor[0].x;
+            measurement(1) = scene_centor[0].y;
+            
+            Mat estimated = KF.correct(measurement);
+            *x = (int)(estimated.at<float>(0));
+            *y = 360-(int)(estimated.at<float>(1));
+        }
+        
+        if (smoothMode == none){
+            *x = (int)scene_centor[0].x;
+            *y = 360-(int)scene_centor[0].y;
+        }
         
         // Draw lines between the corners ( the mapped object in the scene )
         line( img_scene, scene_corners[0], scene_corners[1], Scalar(255), 4 );
@@ -154,6 +224,7 @@ using namespace cv::xfeatures2d;
     }
 }
 @end
+
 
 
 // Declare functions to export to C#

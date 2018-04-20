@@ -7,12 +7,12 @@ using UnityEngine.UI;
 
 public class VideoCapture : MonoBehaviour {
 	// object image dimension
-	private int width;
-	private int height;
+	int width;
+	int height;
 
 	// input width
-	private int inputWidth;
-	private int inputHeight;
+	int inputWidth;
+	int inputHeight;
 
 	public Image renderTarget;
 	public Texture2D objectTexture;
@@ -20,9 +20,15 @@ public class VideoCapture : MonoBehaviour {
 	public Text yText;
 	public GameObject model;
 	public LayerMask collisionLayer;
+	public bool fixLocation;
 
 	// only allow once for object descriptor detection
-	private bool detect = true;
+	bool detect = true;
+	static int validationNum = 5;
+	Vector2Int[] locations = new Vector2Int[validationNum];
+	bool stopDetection = false;
+	int counter = 0;
+
 
 	// Import external library
 	[DllImport("__Internal")]
@@ -134,6 +140,9 @@ public class VideoCapture : MonoBehaviour {
 		if (!texturesInitialized)
 			return;
 
+		if (stopDetection)
+			return;
+
 		//Fetch the video texture
 		SetOpenCVPixelData (true, textureYInputPtr);
 
@@ -157,16 +166,32 @@ public class VideoCapture : MonoBehaviour {
 		if (Physics.Raycast(ray, out hit, 100, collisionLayer))
 		{
 			model.transform.position = hit.point;
-			if (!model.activeInHierarchy)
+			if (!model.activeInHierarchy){
 				model.SetActive(true);
+			}
+				
+			if (fixLocation)
+			{
+				locations[counter].x = x;
+				locations[counter].y = y;
+				counter = counter + 1;
+
+				if (counter == validationNum)
+					counter = 0;
+
+				float variance = Variance(locations, validationNum);
+				Debug.Log(variance);
+
+				if(variance <= 3f)
+				{
+					stopDetection = true;
+				}
+			}
 		}
 
 		detect = false;
+
 		#endif
-
-	}
-
-	void Test(){
 
 	}
 
@@ -193,5 +218,35 @@ public class VideoCapture : MonoBehaviour {
 		OpenCVPixelData (iEnable, YByteArray);
 
 		#endif
+	}
+
+	public float Variance(Vector2Int[] points, int num)
+	{
+		int sum_x = 0;
+		int sum_y = 0;
+		int average_x = 0;
+		int average_y = 0;
+		float variance_square = 0;
+
+		for (int i = 0; i < num; i++) {
+			sum_x += points [i].x;
+			sum_y += points [i].y;
+		}
+
+		average_x = sum_x / num;
+		average_y = sum_y / num;
+
+		Vector2 midPoint = new Vector2 (average_x, average_y);
+
+		for (int i = 0; i < num; i++) {
+			variance_square += Vector2.Distance (points [i], midPoint);
+		}
+
+		return Mathf.Sqrt (variance_square);
+	}
+
+	public void SetStopDetection()
+	{
+		stopDetection = true;
 	}
 }
